@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Alert,
   Badge,
@@ -14,28 +14,37 @@ import NotificationsIcon from "@mui/icons-material/Notifications";
 import { NotificationCard } from "../components/NotificationCard";
 import { NotificationFilter } from "../components/NotificationFilter";
 import { useNotifications } from "../hooks/useNotifications";
+import createLogger from "../utils/logger";
 
-export function NotificationsPage() {
+const log = createLogger("NotificationsPage");
+
+export function NotificationsPage({ refreshTrigger = 0 }) {
   const [filter, setFilter] = useState("All");
   const [page, setPage] = useState(1);
 
-  const { notifications, totalPages, unreadCount, loading, error } =
-    useNotifications(filter, page);
+  const { notifications, totalPages, unreadCount, loading, error, markAsRead } =
+    useNotifications(filter, page, 10, refreshTrigger);
+
+  useEffect(() => {
+    log.info("Page mounted");
+  }, []);
 
   const handleFilterChange = (_event, newFilter) => {
     if (newFilter !== null) {
+      log.info("Filter changed", { from: filter, to: newFilter });
       setFilter(newFilter);
       setPage(1);
     }
   };
 
   const handlePageChange = (_event, newPage) => {
+    log.info("Page changed", { from: page, to: newPage });
     setPage(newPage);
   };
 
   const handleMarkRead = (id) => {
-    // Will be wired to API in Stage 4
-    console.log("Mark as read:", id);
+    log.info("User requested mark as read", { id });
+    markAsRead(id);
   };
 
   return (

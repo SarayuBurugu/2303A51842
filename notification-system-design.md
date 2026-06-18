@@ -2841,6 +2841,55 @@ Notice:
 2. **Code file** — Open `top-notifications.js` in the editor showing the `MaxHeap` class and `computeScore` function
 3. **Design document** — Show the Stage 6 section in `notification-system-design.md` with the complexity analysis visible
 
+# Stage 7
+
+## Frontend Integration, Priority Inbox & Client-side Logging
+
+### Overview
+In this final stage, we implement the student-facing dashboard using **React** and **Material UI**. The application runs on `http://localhost:3000` and comprises three primary views:
+1. **All Notifications Page**: The central feed supporting pagination and type-filtering.
+2. **Priority Inbox**: The Top 10 notification view sorted dynamically by our Max Heap.
+3. **Send Notification Form**: An administrative tool to publish new notifications.
+
+---
+
+### UI & UX Layout Design
+We utilize a clean tabbed panel layout inside `App.jsx` wrapped with a custom `ThemeProvider` using a slate/indigo color palette.
+
+- **Main Navigation Header**: A sticky App Bar containing a notification bell with a real-time badge count representing the overall unread count of all notifications.
+- **Tab Layout**: Integrated tabs allow fast, seamless transition between the main feed, priority inbox, and send form.
+- **Material UI Exclusivity**: We use native MUI components (`Card`, `CardContent`, `Typography`, `Button`, `TextField`, `Select`, `Dialog`, `Alert`, `Snackbar`) without Tailwind or ShadCN.
+
+---
+
+### Shared State & Sync Strategy
+To prevent duplicate network fetches while ensuring data consistency:
+- **Global States in App.jsx**: We maintain the overall notifications list (`allNotifications`), dismissed priority IDs (`dismissedPriorityIds`), and a `refreshTrigger` counter.
+- **Optimistic Updates**: Marking a notification as read immediately sets the `read` flag to `true` locally on both pages. If the patch request fails, the state is rolled back.
+- **Reactive Refetching**: Creating a new notification increments `refreshTrigger`, causing both Page 1 and the global `allNotifications` state to reload.
+- **API Fallback**: If the server API is unavailable, the API client automatically falls back to an in-memory mock collection, simulating a fully functional offline app.
+
+---
+
+### Client-side Max Heap Integration
+The Priority Inbox uses the Stage 6 `MaxHeap` utility:
+- **Filtering**: We filter out notification IDs matching the user's `dismissedPriorityIds` Set.
+- **Sorting**: We push the remaining notifications into the heap and extract the Top 10 using `getTopK()`.
+- **Complexity**:
+  - Pushing $N$ items: $O(N \log N)$
+  - Popping $K=10$ items: $O(K \log N)$
+  - Total client-side latency is negligible ($< 1$ms) for a campus-scale inbox of a few thousand items.
+
+---
+
+### Logging Middleware Integration
+A customized structured logging middleware wrapper is integrated into the frontend (`src/utils/logger.js`). Key event logs include:
+- **Page Load**: `log.info("Page mounted")`
+- **Filter Change**: `log.info("Filter changed", { from, to })`
+- **Form Submission**: `log.info("Form submission started", { title, type })`
+- **Error Capturing**: `log.error("Failed to load notifications", { error })`
+- **Structured Format**: Outputted as `[TIMESTAMP] [LEVEL] [CONTEXT] message { ...metadata }` to the browser developer console.
+
 
 
 
