@@ -2595,6 +2595,253 @@ The key insight: **processing time stays constant** as long as we add workers pr
 
 The code doesn't change. The infrastructure scales. That's the whole point of decoupling with a message queue — the business logic is separate from the scaling concerns.
 
+---
+
+# Stage 6
+
+## Context
+
+We need to rank notifications and show users the **Top 10 highest-priority** ones. Priority depends on two factors:
+
+1. **Notification Type** — Placement is more important than Result, which is more important than Event
+2. **Recency** — among notifications of the same type, newer ones should rank higher
+
+The solution must fetch from the API (not use hardcoded data) and use a **Priority Queue / Max Heap** for efficient ranking.
+
+---
+
+## Approach
+
+### Step 1: Define priority weights
+
+```
+Placement = 3  (highest — placement drives are time-critical)
+Result    = 2  (medium — results are important but less urgent)
+Event     = 1  (lowest — events are informational)
+```
+
+### Step 2: Compute a composite priority score
+
+We need a single number that captures both type importance and recency. The formula:
+
+```
+score = typeWeight × 10¹² + timestamp(ms)
+```
+
+**Why this works:**
+
+- `typeWeight × 10¹²` is the dominant part. A Placement notification gets `3 × 10¹² = 3,000,000,000,000`. A Result gets `2 × 10¹² = 2,000,000,000,000`.
+- The gap between weight levels (`10¹²`) is larger than any possible Unix timestamp in milliseconds (~1.8 × 10¹² for year 2026). This guarantees that **type always wins over recency**.
+- Within the same type, the raw timestamp acts as a tiebreaker — newer notifications have larger timestamps, so they rank higher.
+
+**Example scores:**
+
+| Notification | Type | Created | Score |
+|-------------|------|---------|-------|
+| Amazon SDE Internship | Placement | June 18, 11:30 AM | 3,000,000,000,000 + 1,781,782,200,000 = **4,781,782,200,000** |
+| TCS Placement Drive | Placement | June 18, 9:00 AM | 3,000,000,000,000 + 1,781,773,200,000 = **4,781,773,200,000** |
+| GATE Mock Test Results | Result | June 17, 4:00 PM | 2,000,000,000,000 + 1,781,712,000,000 = **3,781,712,000,000** |
+| Annual Tech Fest | Event | June 16, 10:00 AM | 1,000,000,000,000 + 1,781,604,000,000 = **2,781,604,000,000** |
+
+Amazon SDE > TCS (both Placement, but Amazon is newer). Any Placement > Any Result (type weight dominates).
+
+### Step 3: Insert all notifications into a Max Heap
+
+### Step 4: Extract the top 10 by popping from the heap
+
+---
+
+## Data Structure Used
+
+### Max Heap (Binary Heap)
+
+A **Max Heap** is a complete binary tree where each parent node is greater than or equal to its children. The root always contains the maximum element.
+
+```
+                    [Amazon SDE: 4.78T]              ← Root = highest priority
+                   /                   \
+        [TCS: 4.78T]             [GATE: 3.78T]
+        /          \              /          \
+  [Infosys: 4.78T] [Wipro: 4.78T] [Sem Results: 3.78T] [Mid-Sem: 3.78T]
+```
+
+### Why a heap is a good choice
+
+| Factor | Heap | Sorting (Array.sort) | Linear Scan |
+|--------|------|---------------------|-------------|
+| Get top K | O(n log n + k log n) | O(n log n) | O(n × k) |
+| Insert new item | O(log n) | O(n log n) re-sort | O(1) but then O(n×k) to find top |
+| Memory | O(n) | O(n) | O(1) |
+| Stream-friendly | ✅ Yes | ❌ No (need all data first) | ❌ No |
+
+The key advantage: **the heap handles new notifications efficiently**. When a new notification arrives, we insert it in O(log n) and the heap automatically maintains order. With sorting, we'd need to re-sort the entire array.
+
+For a notification system where new items arrive frequently (placement season!), this matters. The heap stays ready for top-K extraction at any time without re-processing everything.
+
+---
+
+## Complexity Analysis
+
+### Variables
+
+| Symbol | Meaning | Example |
+|--------|---------|---------|
+| n | Total notifications | 15 (sample) or 5,000,000 (production) |
+| k | Number of top items to extract | 10 |
+
+### Building the heap
+
+```
+Insert n items, each takes O(log n)
+Total: O(n log n)
+```
+
+### Extracting top K
+
+```
+Pop k items from heap, each takes O(log n)
+Total: O(k log n)
+```
+
+### Overall
+
+```
+Total = O(n log n) + O(k log n) = O(n log n)
+
+For n = 5,000,000 and k = 10:
+  Build:    5,000,000 × log₂(5,000,000) ≈ 5,000,000 × 22.25 ≈ 111 million ops
+  Extract:  10 × 22.25 = 223 ops
+
+  Compared to brute force (find min 10 times):
+  10 × 5,000,000 = 50 million ops
+```
+
+At this scale, both approaches are fast enough. But the heap wins when:
+- We need to handle **streaming data** (new notifications arriving)
+- We want to change K dynamically (show top 5, top 20, etc.)
+- We're running this operation repeatedly
+
+### Space Complexity
+
+```
+O(n) — one heap node per notification
+```
+
+---
+
+## How New Notifications Are Handled Efficiently
+
+In a real system, notifications arrive in real-time (SSE/WebSocket). Here's how the heap handles them:
+
+### Scenario: New notification arrives while showing top 10
+
+```
+Current heap has n items.
+New notification comes in with score S.
+
+Step 1: heap.push(newNotification)     → O(log n)
+Step 2: heap.peek()                     → O(1), returns new root
+
+If S > current #10's score:
+  → the top 10 has changed, re-extract
+  → O(k log n) = O(10 × 22) = 220 ops
+
+If S < current #10's score:
+  → top 10 is unchanged, do nothing
+  → O(1)
+```
+
+Compare this to sorting:
+- New item arrives → re-sort entire array → O(n log n) = 111 million ops
+- With a heap → just one insert → O(log n) = 22 ops
+
+That's a **5 million x improvement** per new notification.
+
+### Alternative: Min Heap of size K
+
+For even better efficiency with very large datasets, we could use a **Min Heap of size K** instead:
+
+```
+Maintain a min-heap of exactly 10 items.
+For each new notification:
+  if score > minHeap.peek():
+    minHeap.pop()        → O(log k)
+    minHeap.push(item)   → O(log k)
+  else:
+    skip
+
+Total: O(n log k) instead of O(n log n)
+For k=10: O(n × 3.3) instead of O(n × 22.25) — 6.7x faster
+```
+
+This is the optimal approach for Top-K problems at massive scale. The implementation in our code uses the simpler Max Heap approach since it's clearer to understand and our dataset size is manageable.
+
+---
+
+## Implementation
+
+### Code file
+
+The working implementation is at: `notification-app-be/src/top-notifications.js`
+
+It contains:
+- `MaxHeap` class — full binary heap with push/pop/peek
+- `computeScore()` — priority formula
+- `getTopKNotifications()` — Top-K extraction
+- `fetchNotificationsFromAPI()` — API fetch with fallback to sample data
+- `main()` — runner that prints formatted results
+
+### How to run
+
+```bash
+# Navigate to the backend directory
+cd notification-app-be
+
+# Run with sample data (API not needed)
+node src/top-notifications.js
+
+# Run against a live API
+node src/top-notifications.js http://localhost:3001/api/notifications
+```
+
+### Expected output
+
+```
+📡 Fetching notifications from: http://localhost:3001/api/notifications
+📦 Received 15 notifications
+
+==========================================================================================
+  🔔 TOP 10 PRIORITY NOTIFICATIONS (Max Heap)
+==========================================================================================
+
+Rank  Type        Title                              Date                  Score
+------------------------------------------------------------------------------------------
+#1    💼 Placement Amazon SDE Internship              18 Jun 2026, 05:00 pm 4,781,782,200,000
+#2    💼 Placement TCS Placement Drive                18 Jun 2026, 02:30 pm 4,781,773,200,000
+#3    💼 Placement Infosys InfyTQ Results             15 Jun 2026, 04:30 pm 4,781,521,200,000
+#4    💼 Placement Wipro Hiring Drive                 12 Jun 2026, 03:00 pm 4,781,256,600,000
+#5    💼 Placement Cognizant GenC Next                09 Jun 2026, 01:30 pm 4,780,992,000,000
+#6    📊 Result    GATE Mock Test Results             17 Jun 2026, 09:30 pm 3,781,712,000,000
+#7    📊 Result    Semester Results Published         17 Jun 2026, 08:00 pm 3,781,706,600,000
+#8    📊 Result    Mid-Sem Exam Schedule              14 Jun 2026, 01:30 pm 3,781,424,000,000
+#9    📊 Result    Lab Exam Results                   11 Jun 2026, 06:30 pm 3,781,182,800,000
+#10   📊 Result    Supplementary Exam Notice          08 Jun 2026, 02:30 pm 3,780,909,200,000
+==========================================================================================
+```
+
+Notice:
+- All 5 Placement notifications appear first (type weight dominates)
+- Within Placements, they're ordered newest → oldest (recency tiebreaker)
+- Result notifications come next, also sorted by recency
+- Event notifications don't make the top 10 at all (pushed out by higher-priority types)
+
+### Screenshots to capture for submission
+
+1. **Terminal output** — Run `node src/top-notifications.js` and capture the full table showing the Top 10 ranked results
+2. **Code file** — Open `top-notifications.js` in the editor showing the `MaxHeap` class and `computeScore` function
+3. **Design document** — Show the Stage 6 section in `notification-system-design.md` with the complexity analysis visible
+
+
 
 
 
